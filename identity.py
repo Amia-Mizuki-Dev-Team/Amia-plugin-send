@@ -6,7 +6,7 @@ from datetime import datetime
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent, PrivateMessageEvent
 
 from src.plugins.amia_core.identity import (
-    ExternalIdentityKey,
+    UserIdentityKey,
     IdentityResolver,
     UnresolvedIdentityResolver,
 )
@@ -62,11 +62,9 @@ async def build_activity_record(
         bot_app_id=app_id or "unverified",
         scope_verified=bool(app_id),
     )
-    identity_key = ExternalIdentityKey(
-        adapter_type=scope.adapter_type,
-        adapter_instance_id=scope.adapter_instance_id,
-        bot_app_id=scope.bot_app_id,
-        gensokyo_user_id=str(event.user_id),
+    identity_key = UserIdentityKey(
+        self_id=str(event.self_id),
+        user_id=str(event.user_id),
     )
     active_resolver = resolver or UnresolvedIdentityResolver()
     try:

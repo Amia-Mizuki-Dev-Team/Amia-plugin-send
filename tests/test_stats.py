@@ -2,7 +2,7 @@ import unittest
 import asyncio
 import tempfile
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import nonebot
 nonebot.init()
@@ -15,7 +15,7 @@ from amia_plugin_send.config import SendConfig
 from amia_plugin_send.models import ActivityRecord, ActivityScope
 from amia_plugin_send.storage import ActivityStore
 from amia_plugin_send.service import ActivityService
-from amia_core.identity import ExternalIdentityKey, ResolvedIdentity
+from src.plugins.amia_core.identity import UserIdentityKey, ResolvedIdentity
 
 class TestSendStats(unittest.TestCase):
     def setUp(self):
@@ -79,7 +79,8 @@ class TestSendStats(unittest.TestCase):
             await self.service.store.upsert_batch(records)
 
             # Test get_group_rank
-            rank = await self.service.get_group_rank("1111", "2222", date.today(), date.today())
+            tomorrow = date.today() + timedelta(days=1)
+            rank = await self.service.get_group_rank("1111", "2222", date.today(), tomorrow)
             self.assertEqual(len(rank), 2)
             self.assertEqual(rank[0]["gensokyo_user_id"], "3333")
 
@@ -88,24 +89,24 @@ class TestSendStats(unittest.TestCase):
             self.assertEqual(dau["count"], 2)
 
             # Test get_group_activity_summary
-            summary = await self.service.get_group_activity_summary("test-instance", "test-app", "2222", date.today(), date.today())
+            summary = await self.service.get_group_activity_summary("1111", "2222", date.today(), tomorrow)
             self.assertEqual(summary["message_count"], 2)
             self.assertEqual(summary["total_bytes"], 2000)
             self.assertEqual(summary["unique_users"], 2)
 
             # Test get_user_activity
-            identity_key = ExternalIdentityKey("onebot.v11", "test-instance", "test-app", "3333")
+            identity_key = UserIdentityKey("1111", "3333")
             identity = ResolvedIdentity(identity_key, "qq3333")
-            user_act = await self.service.get_user_activity(identity, date.today(), date.today())
+            user_act = await self.service.get_user_activity(identity, date.today(), tomorrow)
             self.assertEqual(user_act["message_count"], 1)
             self.assertEqual(user_act["total_bytes"], 500)
 
             # Test get_instance_active_users
-            active_u = await self.service.get_instance_active_users(date.today())
+            active_u = await self.service.get_instance_active_users(date.today(), tomorrow)
             self.assertEqual(active_u["count"], 2)
 
             # Test get_merged_dau
-            merged = await self.service.get_merged_dau(date.today())
+            merged = await self.service.get_merged_dau(date.today(), tomorrow)
             self.assertEqual(merged["count"], 2)
             self.assertEqual(merged["bound_count"], 1)
             self.assertEqual(merged["unbound_count"], 1)

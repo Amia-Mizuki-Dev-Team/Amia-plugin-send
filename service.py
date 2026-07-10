@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import logging
 from typing import Any
 
@@ -39,7 +39,7 @@ class ActivityService:
         if resolver:
             self.resolver = resolver
             
-        registry.register_stats_provider("send", self)
+        registry.register_stats_provider("send", self, replace=True)
         self.ready = True
 
     async def stop(self) -> None:
@@ -72,9 +72,9 @@ class ActivityService:
                 SELECT COALESCE(SUM(message_count), 0), COALESCE(SUM(total_bytes), 0)
                 FROM activity_daily
                 WHERE adapter_instance_id=? AND bot_app_id=?
-                  AND canonical_user_id=? AND date BETWEEN ? AND ?
+                  AND canonical_user_id=? AND date >= ? AND date < ?
                 """,
-                (scope.adapter_instance_id, scope.bot_app_id, identity.canonical_user_id, start_date.isoformat(), end_date.isoformat()),
+                (self.config.adapter_instance_id, self.config.bot_app_id or "unverified", identity.canonical_user_id, start_date.isoformat(), end_date.isoformat()),
             )
         else:
             row = await self.store.fetch_one(
@@ -82,9 +82,9 @@ class ActivityService:
                 SELECT COALESCE(SUM(message_count), 0), COALESCE(SUM(total_bytes), 0)
                 FROM activity_daily
                 WHERE adapter_instance_id=? AND bot_app_id=?
-                  AND gensokyo_user_id=? AND date BETWEEN ? AND ?
+                  AND gensokyo_user_id=? AND date >= ? AND date < ?
                 """,
-                (scope.adapter_instance_id, scope.bot_app_id, scope.gensokyo_user_id, start_date.isoformat(), end_date.isoformat()),
+                (self.config.adapter_instance_id, self.config.bot_app_id or "unverified", scope.user_id, start_date.isoformat(), end_date.isoformat()),
             )
         return {"message_count": row[0] if row else 0, "total_bytes": row[1] if row else 0}
 
@@ -97,7 +97,7 @@ class ActivityService:
             SELECT gensokyo_user_id, MAX(display_name), SUM(message_count), SUM(total_bytes)
             FROM activity_daily
             WHERE adapter_instance_id=? AND bot_app_id=? AND bot_id=?
-              AND context_type='group' AND context_id=? AND date BETWEEN ? AND ?
+              AND context_type='group' AND context_id=? AND date >= ? AND date < ?
             GROUP BY gensokyo_user_id
             ORDER BY SUM(message_count) DESC, gensokyo_user_id ASC LIMIT ?
             """,
@@ -124,7 +124,7 @@ class ActivityService:
         return {"available": True, "count": row[0] if row else 0, "definition": "group scoped DAU"}
 
     async def get_group_activity_summary(
-        self, adapter_instance_id: str, bot_app_id: str, group_id: str, start_date: date, end_date: date
+        self, self_id: str, group_id: str, start_date: date, end_date: date
     ) -> dict[str, Any]:
         """StatsProvider protocol implementation for group activity."""
         row = await self.store.fetch_one(
@@ -132,10 +132,10 @@ class ActivityService:
             SELECT COALESCE(SUM(message_count), 0), COALESCE(SUM(total_bytes), 0),
                    COUNT(DISTINCT gensokyo_user_id)
             FROM activity_daily
-            WHERE adapter_instance_id=? AND bot_app_id=?
-              AND context_type='group' AND context_id=? AND date BETWEEN ? AND ?
+            WHERE adapter_instance_id=? AND bot_app_id=? AND bot_id=?
+              AND context_type='group' AND context_id=? AND date >= ? AND date < ?
             """,
-            (adapter_instance_id, bot_app_id, group_id, start_date.isoformat(), end_date.isoformat()),
+            (self.config.adapter_instance_id, self.config.bot_app_id or "unverified", self_id, group_id, start_date.isoformat(), end_date.isoformat()),
         )
         return {"message_count": row[0] if row else 0, "total_bytes": row[1] if row else 0, "unique_users": row[2] if row else 0}
 
@@ -149,34 +149,34 @@ class ActivityService:
             FROM activity_daily
             WHERE adapter_instance_id=? AND bot_app_id=? AND bot_id=?
               AND context_type='group' AND context_id=? AND gensokyo_user_id=?
-              AND date BETWEEN ? AND ?
+              AND date >= ? AND date < ?
             """,
             (scope.adapter_instance_id, scope.bot_app_id, scope.bot_id, context_id, user_id, start_date.isoformat(), end_date.isoformat()),
         )
         return {"message_count": row[0], "total_bytes": row[1], "display_name": row[2] or user_id}
 
-    async def get_instance_active_users(self, target_date: date) -> dict[str, Any]:
+    async def get_instance_active_users(self, start_date: date, end_date: date) -> dict[str, Any]:
         if not self.config.cross_context_user_id_stable or not self.config.bot_app_id:
             return {"available": False, "count": None, "reason": "identity stability is not verified"}
         row = await self.store.fetch_one(
             """
             SELECT COUNT(DISTINCT gensokyo_user_id) FROM activity_daily
-            WHERE adapter_instance_id=? AND bot_app_id=? AND date=?
+            WHERE adapter_instance_id=? AND bot_app_id=? AND date >= ? AND date < ?
             """,
-            (self.config.adapter_instance_id, self.config.bot_app_id, target_date.isoformat()),
+            (self.config.adapter_instance_id, self.config.bot_app_id, start_date.isoformat(), end_date.isoformat()),
         )
         return {"available": True, "count": row[0] if row else 0, "definition": "verified instance active users"}
 
-    async def get_merged_dau(self, target_date: date) -> dict[str, Any]:
-        if not self.config.bot_app_id:
-            return {"available": False, "count": None, "reason": "bot_app_id is unavailable"}
+    async def get_merged_dau(self, start_date: date, end_date: date) -> dict[str, Any]:
+        if not self.config.bot_app_id or not self.config.cross_context_user_id_stable:
+            return {"available": False, "count": None, "reason": "cross-context user identity is not verified"}
         rows = await self.store.fetch_all(
             """
             SELECT canonical_user_id, gensokyo_user_id
             FROM activity_daily
-            WHERE adapter_instance_id=? AND bot_app_id=? AND date=?
+            WHERE adapter_instance_id=? AND bot_app_id=? AND date >= ? AND date < ?
             """,
-            (self.config.adapter_instance_id, self.config.bot_app_id, target_date.isoformat()),
+            (self.config.adapter_instance_id, self.config.bot_app_id, start_date.isoformat(), end_date.isoformat()),
         )
         keys = {f"c:{canonical}" if canonical else f"g:{user}" for canonical, user in rows}
         bound = {canonical for canonical, _ in rows if canonical}
@@ -203,7 +203,8 @@ class ActivityService:
             """,
             (scope.adapter_instance_id, scope.bot_app_id, scope.bot_id, start.isoformat(), today.isoformat()),
         )
-        instance = await self.get_instance_active_users(today)
+        end_exclusive = today + timedelta(days=1)
+        instance = await self.get_instance_active_users(start, end_exclusive)
         return {"total_messages": row[0], "total_bytes": row[1], "active_groups": row[2], "instance_dau": instance}
 
 
