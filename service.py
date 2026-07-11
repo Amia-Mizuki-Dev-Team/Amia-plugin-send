@@ -71,20 +71,20 @@ class ActivityService:
                 """
                 SELECT COALESCE(SUM(message_count), 0), COALESCE(SUM(total_bytes), 0)
                 FROM activity_daily
-                WHERE adapter_instance_id=? AND bot_app_id=?
+                WHERE adapter_instance_id=? AND bot_app_id=? AND bot_id=?
                   AND canonical_user_id=? AND date >= ? AND date < ?
                 """,
-                (self.config.adapter_instance_id, self.config.bot_app_id or "unverified", identity.canonical_user_id, start_date.isoformat(), end_date.isoformat()),
+                (self.config.adapter_instance_id, self.config.bot_app_id or "unverified", scope.self_id, identity.canonical_user_id, start_date.isoformat(), end_date.isoformat()),
             )
         else:
             row = await self.store.fetch_one(
                 """
                 SELECT COALESCE(SUM(message_count), 0), COALESCE(SUM(total_bytes), 0)
                 FROM activity_daily
-                WHERE adapter_instance_id=? AND bot_app_id=?
+                WHERE adapter_instance_id=? AND bot_app_id=? AND bot_id=?
                   AND gensokyo_user_id=? AND date >= ? AND date < ?
                 """,
-                (self.config.adapter_instance_id, self.config.bot_app_id or "unverified", scope.user_id, start_date.isoformat(), end_date.isoformat()),
+                (self.config.adapter_instance_id, self.config.bot_app_id or "unverified", scope.self_id, scope.user_id, start_date.isoformat(), end_date.isoformat()),
             )
         return {"message_count": row[0] if row else 0, "total_bytes": row[1] if row else 0}
 
