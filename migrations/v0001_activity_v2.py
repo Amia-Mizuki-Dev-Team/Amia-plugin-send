@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-import shutil
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -14,6 +14,17 @@ from ..storage import ActivityStore
 async def dry_run(db_path: str | Path) -> dict[str, Any]:
     """Inspect an existing send database without schema or data mutation."""
     return await ActivityStore(Path(db_path)).legacy_dry_run()
+
+
+def backup_sqlite(source_path: Path, target_path: Path) -> None:
+    """Create a consistent SQLite snapshot, including committed WAL content."""
+    source = sqlite3.connect(source_path)
+    target = sqlite3.connect(target_path)
+    try:
+        source.backup(target)
+    finally:
+        target.close()
+        source.close()
 
 
 async def migrate(
@@ -41,8 +52,14 @@ async def migrate(
         f"{db_path.name}.pre-v2.{datetime.now().strftime('%Y%m%d%H%M%S')}.bak"
     )
     try:
-        shutil.copy2(db_path, backup_path)
-    except OSError as exc:
+        await __import__("asyncio").to_thread(backup_sqlite, db_path, backup_path)
+        backup_db = sqlite3.connect(backup_path)
+        try:
+            if backup_path.stat().st_size == 0 or backup_db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise RuntimeError("migration backup integrity check failed")
+        finally:
+            backup_db.close()
+    except (OSError, sqlite3.Error) as exc:
         raise RuntimeError(f"unable to create migration backup {backup_path}") from exc
 
     async with aiosqlite.connect(db_path) as db:
@@ -108,6 +125,13 @@ async def migrate(
                         date, adapter_type, adapter_instance_id, bot_id,
                         bot_app_id, source_table
                     )
+                );
+                CREATE TABLE IF NOT EXISTS legacy_hourly_metrics (
+                    date TEXT NOT NULL,
+                    hour INTEGER NOT NULL CHECK(hour BETWEEN 0 AND 23),
+                    message_count INTEGER NOT NULL,
+                    source_table TEXT NOT NULL,
+                    PRIMARY KEY (date, hour, source_table)
                 );
                 CREATE INDEX IF NOT EXISTS idx_activity_group_range ON activity_daily (
                     adapter_instance_id, bot_app_id, bot_id, context_type, context_id, date
@@ -175,16 +199,13 @@ async def migrate(
             if tables.get("hourly_stats", {}).get("exists"):
                 await db.execute(
                     """
-                    INSERT INTO activity_hourly (
-                        date, hour, adapter_type, adapter_instance_id, bot_id, bot_app_id,
-                        context_type, context_id, message_count, total_bytes
+                    INSERT INTO legacy_hourly_metrics (
+                        date, hour, message_count, source_table
                     )
-                    SELECT 
-                        date, hour, 'onebot.v11', ?, ?, ?,
-                        'group', '*', count, 0
+                    SELECT
+                        date, hour, count, 'hourly_stats'
                     FROM hourly_stats_legacy_bak
-                    """,
-                    (adapter_instance_id, bot_id, bot_app_id),
+                    """
                 )
 
             if tables.get("traffic_stats", {}).get("exists"):
@@ -212,6 +233,13 @@ async def migrate(
                     target_total = (await cursor.fetchone())[0]
                 if source_total != target_total:
                     raise RuntimeError(f"migration validation failed for {source}: {source_total} != {target_total}")
+            if tables.get("hourly_stats", {}).get("exists"):
+                async with db.execute("SELECT COALESCE(SUM(count), 0) FROM hourly_stats_legacy_bak") as cursor:
+                    source_total = (await cursor.fetchone())[0]
+                async with db.execute("SELECT COALESCE(SUM(message_count), 0) FROM legacy_hourly_metrics WHERE source_table='hourly_stats'") as cursor:
+                    target_total = (await cursor.fetchone())[0]
+                if source_total != target_total:
+                    raise RuntimeError("migration validation failed for hourly_stats")
 
             # 4. Record migration status
             await db.execute(

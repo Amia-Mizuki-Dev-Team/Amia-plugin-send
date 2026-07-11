@@ -103,9 +103,10 @@ class TestSendMigration(unittest.TestCase):
             self.assertEqual(private_rows[0][3], 20)
             self.assertEqual(private_rows[0][4], "private_stats")
 
-            # Verify hourly activity table
+            # Legacy hourly data has no reliable group/private context, so it
+            # stays in the non-semantic legacy metrics table.
             rows_hourly = await self.store.fetch_all(
-                "SELECT hour, message_count FROM activity_hourly", ()
+                "SELECT hour, message_count FROM legacy_hourly_metrics", ()
             )
             self.assertEqual(len(rows_hourly), 1)
             self.assertEqual(rows_hourly[0][0], 14)
