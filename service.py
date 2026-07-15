@@ -7,14 +7,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from nonebot.adapters.onebot.v11 import MessageEvent
 
-from src.plugins.amia_core.identity import (
-    IdentityResolver,
-    ResolvedIdentity,
-    UnresolvedIdentityResolver,
-)
-from src.plugins.amia_core.registry import registry
-
 from .config import SendConfig, load_send_config
+from .core_contract import get_core
 from .identity import build_activity_record
 from .models import ActivityScope
 from .storage import ActivityStore, LegacyDatabaseDetected
@@ -29,7 +23,7 @@ class ActivityService:
         self.config = config or load_send_config()
         self.store = ActivityStore(self.config.db_path)
         self.writer = ActivityWriter(self.store, self.config)
-        self.resolver: IdentityResolver = UnresolvedIdentityResolver()
+        self.resolver: Any | None = None
         self.ready = False
 
     def _today(self) -> date:
@@ -53,13 +47,16 @@ class ActivityService:
             )
             return
 
-        await self.writer.start()
+        core = get_core()
+        if self.resolver is None:
+            self.resolver = core.UnresolvedIdentityResolver()
 
-        resolver = registry.get_identity_resolver()
+        resolver = core.registry.get_identity_resolver()
         if resolver:
             self.resolver = resolver
 
-        registry.register_stats_provider("send", self, replace=True)
+        core.registry.register_stats_provider("send", self, replace=True)
+        await self.writer.start()
         self.ready = True
 
     async def stop(self) -> None:
@@ -89,7 +86,7 @@ class ActivityService:
 
     async def get_user_activity(
         self,
-        identity: ResolvedIdentity,
+        identity: Any,
         start_date: date,
         end_date: date,
     ) -> dict[str, Any]:

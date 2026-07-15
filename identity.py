@@ -2,16 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime
+from typing import Any
 
 from nonebot.adapters.onebot.v11 import GroupMessageEvent, MessageEvent, PrivateMessageEvent
 
-from src.plugins.amia_core.identity import (
-    UserIdentityKey,
-    IdentityResolver,
-    UnresolvedIdentityResolver,
-)
-
 from .config import SendConfig
+from .core_contract import get_core
 from .models import ActivityRecord, ActivityScope
 
 
@@ -41,7 +37,7 @@ def _display_name(event: MessageEvent) -> str | None:
 async def build_activity_record(
     event: MessageEvent,
     config: SendConfig,
-    resolver: IdentityResolver | None = None,
+    resolver: Any | None = None,
 ) -> ActivityRecord | None:
     if isinstance(event, GroupMessageEvent):
         context_type = "group"
@@ -62,11 +58,12 @@ async def build_activity_record(
         bot_app_id=app_id or "unverified",
         scope_verified=bool(app_id),
     )
-    identity_key = UserIdentityKey(
+    core = get_core()
+    identity_key = core.UserIdentityKey(
         self_id=str(event.self_id),
         user_id=str(event.user_id),
     )
-    active_resolver = resolver or UnresolvedIdentityResolver()
+    active_resolver = resolver or core.UnresolvedIdentityResolver()
     try:
         resolved = await asyncio.wait_for(
             active_resolver.resolve_identity(identity_key),

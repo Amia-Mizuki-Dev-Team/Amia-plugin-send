@@ -20,7 +20,11 @@ from amia_plugin_send.config import SendConfig
 from amia_plugin_send.models import ActivityRecord, ActivityScope
 from amia_plugin_send.service import ActivityService
 from amia_plugin_send.writer import ActivityWriter
-from src.plugins.amia_core.identity import ResolvedIdentity, UserIdentityKey
+from amia_plugin_send.core_contract import get_core
+
+_core = get_core()
+ResolvedIdentity = _core.ResolvedIdentity
+UserIdentityKey = _core.UserIdentityKey
 
 
 class FailingStore:

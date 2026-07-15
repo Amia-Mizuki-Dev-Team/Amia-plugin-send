@@ -252,6 +252,9 @@ Resolver 不存在、超时或失败时，消息仍可写入，只是不包含 c
 
 Send 不直接修改 Gensokyo idmap，也不把昵称作为身份主键。
 
+运行时通过 `from nonebot import require; require("amia_core")` 加载契约，
+不依赖固定的 `src.plugins` 部署路径。
+
 ## 推荐加载顺序
 
 ```text
