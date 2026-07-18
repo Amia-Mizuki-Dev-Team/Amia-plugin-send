@@ -29,3 +29,5 @@ class ActivityRecord:
     display_name: str | None
     message_bytes: int
     occurred_at: datetime
+    message_id: str | None = None
+    dedupe_key: str | None = None

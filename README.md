@@ -30,10 +30,12 @@ StatsProvider("send")
 - Bot 实例活跃用户统计；
 - 管理员活动概览；
 - 绑定前后身份归并统计。
+- 默认忽略 Bot 自身消息，可通过显式配置改变。
 
 ## 当前能力
 
 - 记录消息数量和估算字节数；
+- 记录可选 `message_id` 和不可逆 `dedupe_key`，不保存完整消息正文；
 - 保存显示名、首次出现和最后出现时间；
 - 按 `self_id + group_id` 隔离群统计；
 - 支持今日、本月、今年排行；
@@ -85,13 +87,16 @@ context_type
 context_id
 gensokyo_user_id
 canonical_user_id
+message_id
+occurred_at
+dedupe_key
 date
 ```
 
 统计口径：
 
 - 群排行：当前 `self_id + group_id`；
-- 群 DAU：指定群、指定日期内不同 `gensokyo_user_id`；
+- 群 DAU：指定群、指定日期内不同 canonical ID，未绑定用户使用带命名空间的外部 ID；
 - 用户活动：当前 `self_id` 内；
 - 实例活跃用户：仅在明确配置 AppID 且确认跨上下文 ID 稳定时启用；
 - merged DAU：使用 canonical 映射归并绑定前后记录，检测冲突时返回不可用。
@@ -117,6 +122,7 @@ AMIA_SEND_WRITER_FLUSH_SECONDS=0.5
 AMIA_SEND_RESOLVER_TIMEOUT_SECONDS=0.2
 AMIA_SEND_DEAD_LETTER_PATH=
 AMIA_SEND_DEAD_LETTER_MAX_BYTES=5242880
+AMIA_SEND_RECORD_BOT_MESSAGES=false
 AMIA_TIMEZONE=Asia/Shanghai
 ```
 
@@ -140,6 +146,7 @@ AMIA_TIMEZONE=Asia/Shanghai
 ```text
 activity_daily
 activity_hourly
+activity_messages
 legacy_daily_metrics
 legacy_hourly_metrics
 schema_migrations
@@ -151,6 +158,7 @@ schema_migrations
 - `activity_hourly`：新版本产生的小时统计；
 - `legacy_daily_metrics`：无法安全映射为用户活动的旧日数据；
 - `legacy_hourly_metrics`：缺少可靠群/私聊上下文的旧小时数据；
+- `activity_messages`：消息去重索引，只保存作用域、事件时间和身份字段，不保存正文；
 - `schema_migrations`：迁移状态。
 
 运行时使用：
@@ -222,6 +230,9 @@ get_user_activity_summary
 get_instance_active_users
 get_merged_dau
 get_admin_dashboard_data
+record_message
+get_user_stats / get_group_stats / get_dau / get_user_ranking / get_group_ranking
+health_check
 ```
 
 调用方应通过 `call_provider_safe()` 处理 Provider 缺失、异常和超时，不应直接读取 Send SQLite。
@@ -287,14 +298,14 @@ traffic_stats
 - 数据库是否存在；
 - `PRAGMA integrity_check`；
 - 旧表是否存在；
-- `*_legacy_bak` 是否已存在；
+- 是否存在未完成的 `*_legacy_bak` 状态；已完成迁移可安全 dry-run 和幂等重入；
 - 新旧表同时存在的部分迁移状态；
 - 数据库绝对路径和文件大小。
 
 以下情况应拒绝迁移：
 
 - integrity check 不是 `ok`；
-- 已存在 legacy backup 表；
+- 存在 legacy backup 表但仍同时存在活动旧表；
 - 检测到部分迁移状态；
 - 当前数据库不是预期目标文件。
 
@@ -364,6 +375,15 @@ python -m unittest discover -s src/plugins/Amia-plugin-send/tests -v
 - 群、私聊、小时和流量迁移总量；
 - Provider 注册和消费；
 - 失败后的数据库状态和回滚行为。
+
+Send Benchmark：
+
+```powershell
+python benchmarks/benchmark_send.py
+```
+
+固定执行 2 次预热和 5 次正式运行，覆盖 1000/10000 条写入、DAU，
+以及 10000/100000 条排行查询；输出只写标准输出，不产生业务数据。
 
 ## 已知限制
 

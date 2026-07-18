@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 from nonebot import on_command
-from nonebot.adapters.onebot.v11 import Bot, GroupMessageEvent
+from nonebot.adapters.onebot.v11 import GROUP_ADMIN, GROUP_OWNER, Bot, GroupMessageEvent
 from nonebot.matcher import Matcher
 from nonebot.permission import SUPERUSER
 
@@ -29,7 +29,7 @@ def _format_bytes(value: int) -> str:
 
 def register_commands(service: ActivityService) -> None:
     for command, aliases, mode, title in (
-        ("今日发言", {"今日排行榜"}, "day", "今日龙王榜"),
+        ("今日发言", {"今日排行榜", "群排行"}, "day", "今日龙王榜"),
         ("本月发言", {"本月排行榜"}, "month", "本月龙王榜"),
         ("今年发言", {"今年排行榜"}, "year", "年度龙王榜"),
     ):
@@ -71,14 +71,14 @@ def register_commands(service: ActivityService) -> None:
             await matcher.finish("\n".join(lines))
 
     for command, aliases, mode, title in (
-        ("今日DAU", {"全群统计", "bot数据"}, "day", "今日"),
+        ("今日DAU", {"全群统计", "bot数据", "DAU", "活动统计"}, "day", "今日"),
         ("本月DAU", {"本月统计"}, "month", "本月"),
         ("今年DAU", {"年度统计"}, "year", "年度"),
     ):
         matcher = on_command(
             command,
             aliases=aliases,
-            permission=SUPERUSER,
+            permission=SUPERUSER | GROUP_OWNER | GROUP_ADMIN,
             priority=1,
             block=True,
         )

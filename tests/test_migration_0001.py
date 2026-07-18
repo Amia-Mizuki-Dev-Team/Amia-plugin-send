@@ -4,6 +4,7 @@ import tempfile
 import aiosqlite
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 import nonebot
 nonebot.init()
@@ -132,6 +133,45 @@ class TestSendMigration(unittest.TestCase):
 
             # Original legacy tables should no longer exist
             self.assertFalse(await check_table("msg_stats"))
+
+            # A completed migration is a safe no-op and does not require
+            # deleting the preserved legacy backup tables.
+            before = self.db_path.stat().st_size
+            self.assertTrue((await dry_run(self.db_path))["already_migrated"])
+            await migrate(
+                db_path=self.db_path,
+                adapter_instance_id="test-instance",
+                bot_app_id="test-app",
+                bot_id="1111",
+            )
+            self.assertEqual(self.db_path.stat().st_size, before)
+
+        asyncio.run(run_test())
+
+    def test_migration_rolls_back_schema_when_creation_fails(self):
+        async def run_test():
+            await self._setup_legacy_db()
+            from amia_plugin_send.migrations import v0001_activity_v2 as migration
+
+            async def fail_schema(_db):
+                raise RuntimeError("forced schema failure")
+
+            with patch.object(migration, "create_schema", fail_schema):
+                with self.assertRaises(RuntimeError):
+                    await migration.migrate(
+                        db_path=self.db_path,
+                        adapter_instance_id="test-instance",
+                        bot_app_id="test-app",
+                        bot_id="1111",
+                    )
+
+            async with aiosqlite.connect(self.db_path) as db:
+                async with db.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ) as cursor:
+                    names = {row[0] for row in await cursor.fetchall()}
+            self.assertIn("msg_stats", names)
+            self.assertNotIn("activity_daily", names)
 
         asyncio.run(run_test())
 

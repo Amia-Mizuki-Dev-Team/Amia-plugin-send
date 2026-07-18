@@ -191,6 +191,22 @@ class TestSendRegressions(unittest.TestCase):
 
         asyncio.run(run_test())
 
+    def test_health_check_does_not_expose_storage_handles(self) -> None:
+        async def run_test() -> None:
+            service = ActivityService(self.config)
+            self.assertEqual(
+                await service.health_check(),
+                {"ok": False, "status": "not_ready"},
+            )
+            await service.start()
+            health = await service.health_check()
+            self.assertTrue(health["ok"])
+            self.assertTrue(health["scope_verified"])
+            self.assertNotIn("connection", health)
+            await service.stop()
+
+        asyncio.run(run_test())
+
 
 if __name__ == "__main__":
     unittest.main()

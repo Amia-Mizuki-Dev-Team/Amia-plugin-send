@@ -26,6 +26,7 @@ class SendConfig:
     timezone_name: str = "Asia/Shanghai"
     dead_letter_path: Path | None = None
     dead_letter_max_bytes: int = 5 * 1024 * 1024
+    record_bot_messages: bool = False
 
 
 def _get_setting(config: Any, name: str, default: Any) -> Any:
@@ -118,5 +119,8 @@ def load_send_config() -> SendConfig:
                     5 * 1024 * 1024,
                 )
             ),
+        ),
+        record_bot_messages=bool(
+            _get_setting(config, "amia_send_record_bot_messages", False)
         ),
     )

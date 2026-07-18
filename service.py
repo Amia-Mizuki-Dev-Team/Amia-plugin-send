@@ -6,7 +6,6 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from nonebot.adapters.onebot.v11 import MessageEvent
-
 from .config import SendConfig, load_send_config
 from .core_contract import get_core
 from .identity import build_activity_record
@@ -145,16 +144,19 @@ class ActivityService:
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         scope = self._scope(bot_id)
+        safe_limit = max(1, min(int(limit), 100))
         rows = await self.store.fetch_all(
             """
-            SELECT gensokyo_user_id, MAX(display_name),
+            SELECT COALESCE(canonical_user_id, 'external:' || gensokyo_user_id),
+                   MAX(gensokyo_user_id), MAX(display_name),
                    SUM(message_count), SUM(total_bytes)
             FROM activity_daily
             WHERE adapter_instance_id=? AND bot_app_id=? AND bot_id=?
               AND context_type='group' AND context_id=?
               AND date >= ? AND date < ?
-            GROUP BY gensokyo_user_id
-            ORDER BY SUM(message_count) DESC, gensokyo_user_id ASC
+            GROUP BY COALESCE(canonical_user_id, 'external:' || gensokyo_user_id)
+            ORDER BY SUM(message_count) DESC,
+                     MIN(gensokyo_user_id) ASC
             LIMIT ?
             """,
             (
@@ -164,15 +166,51 @@ class ActivityService:
                 context_id,
                 start_date.isoformat(),
                 end_date.isoformat(),
-                limit,
+                safe_limit,
             ),
         )
         return [
             {
-                "gensokyo_user_id": row[0],
-                "display_name": row[1] or row[0],
-                "message_count": row[2],
-                "total_bytes": row[3],
+                "identity_key": row[0],
+                "gensokyo_user_id": row[1],
+                "display_name": row[2] or row[1] or row[0],
+                "message_count": row[3],
+                "total_bytes": row[4],
+            }
+            for row in rows
+        ]
+
+    async def get_group_ranking(
+        self,
+        bot_id: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[dict[str, Any]]:
+        scope = self._scope(bot_id)
+        rows = await self.store.fetch_all(
+            """
+            SELECT context_id, SUM(message_count), COUNT(DISTINCT COALESCE(
+                canonical_user_id, 'external:' || gensokyo_user_id
+            ))
+            FROM activity_daily
+            WHERE adapter_instance_id=? AND bot_app_id=? AND bot_id=?
+              AND context_type='group' AND date >= ? AND date < ?
+            GROUP BY context_id
+            ORDER BY SUM(message_count) DESC, context_id ASC
+            """,
+            (
+                scope.adapter_instance_id,
+                scope.bot_app_id,
+                scope.bot_id,
+                start_date.isoformat(),
+                end_date.isoformat(),
+            ),
+        )
+        return [
+            {
+                "group_id": row[0],
+                "message_count": row[1],
+                "unique_users": row[2],
             }
             for row in rows
         ]
@@ -186,7 +224,10 @@ class ActivityService:
         scope = self._scope(bot_id)
         row = await self.store.fetch_one(
             """
-            SELECT COUNT(DISTINCT gensokyo_user_id)
+            SELECT COUNT(DISTINCT COALESCE(
+                canonical_user_id,
+                'external:' || gensokyo_user_id
+            ))
             FROM activity_daily
             WHERE adapter_instance_id=? AND bot_app_id=? AND bot_id=?
               AND context_type='group' AND context_id=? AND date=?
@@ -216,7 +257,10 @@ class ActivityService:
             """
             SELECT COALESCE(SUM(message_count), 0),
                    COALESCE(SUM(total_bytes), 0),
-                   COUNT(DISTINCT gensokyo_user_id)
+                   COUNT(DISTINCT COALESCE(
+                       canonical_user_id,
+                       'external:' || gensokyo_user_id
+                   ))
             FROM activity_daily
             WHERE adapter_instance_id=? AND bot_app_id=? AND bot_id=?
               AND context_type='group' AND context_id=?
@@ -289,7 +333,10 @@ class ActivityService:
 
         row = await self.store.fetch_one(
             """
-            SELECT COUNT(DISTINCT gensokyo_user_id)
+            SELECT COUNT(DISTINCT COALESCE(
+                canonical_user_id,
+                'external:' || gensokyo_user_id
+            ))
             FROM activity_daily
             WHERE adapter_instance_id=? AND bot_app_id=?
               AND date >= ? AND date < ?
@@ -434,6 +481,25 @@ class ActivityService:
             "total_bytes": row[1],
             "active_groups": row[2],
             "instance_dau": instance,
+        }
+
+    async def health_check(self) -> dict[str, Any]:
+        """Return a small operational status without exposing the DB handle."""
+
+        if not self.ready:
+            return {"ok": False, "status": "not_ready"}
+        try:
+            row = await self.store.fetch_one("SELECT 1", ())
+        except Exception as exc:  # noqa: BLE001 - health must not raise
+            return {
+                "ok": False,
+                "status": "database_error",
+                "error_type": type(exc).__name__,
+            }
+        return {
+            "ok": row == (1,),
+            "status": "ready" if row == (1,) else "database_error",
+            "scope_verified": bool(self.config.bot_app_id),
         }
 
 

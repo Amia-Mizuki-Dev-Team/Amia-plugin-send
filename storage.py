@@ -10,11 +10,144 @@ import aiosqlite
 from .models import ActivityRecord
 
 
-SCHEMA_VERSION = "send-activity-v2-0001"
+SCHEMA_VERSION = "send-activity-v2-0002"
 
 
 class LegacyDatabaseDetected(RuntimeError):
     """Raised instead of mutating an unmigrated legacy send database."""
+
+
+async def create_schema(db: aiosqlite.Connection) -> None:
+    """Create the current schema one statement at a time.
+
+    Keeping each DDL statement explicit is important for migration rollback:
+    SQLite's ``executescript`` may commit an open transaction before running
+    the script.
+    """
+
+    statements = (
+        """
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            version TEXT PRIMARY KEY,
+            checksum TEXT NOT NULL,
+            applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            status TEXT NOT NULL,
+            details_json TEXT NOT NULL DEFAULT '{}'
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS activity_daily (
+            date TEXT NOT NULL,
+            adapter_type TEXT NOT NULL,
+            adapter_instance_id TEXT NOT NULL,
+            bot_id TEXT NOT NULL,
+            bot_app_id TEXT NOT NULL,
+            context_type TEXT NOT NULL CHECK(context_type IN ('group', 'private')),
+            context_id TEXT NOT NULL,
+            gensokyo_user_id TEXT NOT NULL,
+            canonical_user_id TEXT,
+            display_name TEXT,
+            message_count INTEGER NOT NULL DEFAULT 0 CHECK(message_count >= 0),
+            total_bytes INTEGER NOT NULL DEFAULT 0 CHECK(total_bytes >= 0),
+            first_seen_at TEXT NOT NULL,
+            last_seen_at TEXT NOT NULL,
+            legacy_source TEXT,
+            PRIMARY KEY (
+                date, adapter_type, adapter_instance_id, bot_id, bot_app_id,
+                context_type, context_id, gensokyo_user_id
+            )
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS activity_hourly (
+            date TEXT NOT NULL,
+            hour INTEGER NOT NULL CHECK(hour BETWEEN 0 AND 23),
+            adapter_type TEXT NOT NULL,
+            adapter_instance_id TEXT NOT NULL,
+            bot_id TEXT NOT NULL,
+            bot_app_id TEXT NOT NULL,
+            context_type TEXT NOT NULL CHECK(context_type IN ('group', 'private')),
+            context_id TEXT NOT NULL,
+            message_count INTEGER NOT NULL DEFAULT 0,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (
+                date, hour, adapter_type, adapter_instance_id, bot_id,
+                bot_app_id, context_type, context_id
+            )
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS legacy_daily_metrics (
+            date TEXT NOT NULL,
+            adapter_type TEXT NOT NULL,
+            adapter_instance_id TEXT NOT NULL,
+            bot_id TEXT NOT NULL,
+            bot_app_id TEXT NOT NULL,
+            total_bytes INTEGER NOT NULL DEFAULT 0,
+            source_table TEXT NOT NULL,
+            PRIMARY KEY (
+                date, adapter_type, adapter_instance_id, bot_id,
+                bot_app_id, source_table
+            )
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS legacy_hourly_metrics (
+            date TEXT NOT NULL,
+            hour INTEGER NOT NULL CHECK(hour BETWEEN 0 AND 23),
+            message_count INTEGER NOT NULL,
+            source_table TEXT NOT NULL,
+            PRIMARY KEY (date, hour, source_table)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS activity_messages (
+            dedupe_key TEXT PRIMARY KEY,
+            message_id TEXT,
+            occurred_at TEXT NOT NULL,
+            adapter_type TEXT NOT NULL,
+            adapter_instance_id TEXT NOT NULL,
+            bot_id TEXT NOT NULL,
+            bot_app_id TEXT NOT NULL,
+            context_type TEXT NOT NULL CHECK(context_type IN ('group', 'private')),
+            context_id TEXT NOT NULL,
+            gensokyo_user_id TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_activity_group_range ON activity_daily (
+            adapter_instance_id, bot_app_id, bot_id, context_type, context_id, date
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_activity_instance_dau ON activity_daily (
+            adapter_instance_id, bot_app_id, date, gensokyo_user_id
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_activity_canonical_dau ON activity_daily (
+            adapter_instance_id, bot_app_id, date, canonical_user_id
+        ) WHERE canonical_user_id IS NOT NULL
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_activity_user_range ON activity_daily (
+            adapter_instance_id, bot_app_id, gensokyo_user_id, date
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_activity_hour_range ON activity_hourly (
+            adapter_instance_id, bot_app_id, context_type, context_id, date, hour
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_activity_messages_scope ON activity_messages (
+            adapter_instance_id, bot_app_id, bot_id, context_type, context_id,
+            occurred_at
+        )
+        """,
+    )
+    for statement in statements:
+        await db.execute(statement)
 
 
 class ActivityStore:
@@ -28,7 +161,13 @@ class ActivityStore:
                 "SELECT name FROM sqlite_master WHERE type='table'"
             ) as cursor:
                 existing_tables = {row[0] for row in await cursor.fetchall()}
-            if "msg_stats" in existing_tables and "activity_daily" not in existing_tables:
+            legacy_tables = {
+                "msg_stats",
+                "private_stats",
+                "hourly_stats",
+                "traffic_stats",
+            }
+            if legacy_tables.intersection(existing_tables) and "activity_daily" not in existing_tables:
                 raise LegacyDatabaseDetected(
                     "legacy send database detected; run migrations.v0001_activity_v2.dry_run first"
                 )
@@ -111,6 +250,7 @@ class ActivityStore:
                 );
                 """
             )
+            await create_schema(db)
             await db.execute(
                 """
                 INSERT OR IGNORE INTO schema_migrations(version, checksum, status, details_json)
@@ -130,6 +270,30 @@ class ActivityStore:
             for record in rows:
                 timestamp = record.occurred_at.isoformat(timespec="seconds")
                 scope = record.scope
+                if record.dedupe_key:
+                    cursor = await db.execute(
+                        """
+                        INSERT OR IGNORE INTO activity_messages (
+                            dedupe_key, message_id, occurred_at, adapter_type,
+                            adapter_instance_id, bot_id, bot_app_id,
+                            context_type, context_id, gensokyo_user_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            record.dedupe_key,
+                            record.message_id,
+                            timestamp,
+                            scope.adapter_type,
+                            scope.adapter_instance_id,
+                            scope.bot_id,
+                            scope.bot_app_id,
+                            record.context_type,
+                            record.context_id,
+                            record.gensokyo_user_id,
+                        ),
+                    )
+                    if cursor.rowcount == 0:
+                        continue
                 await db.execute(
                     """
                     INSERT INTO activity_daily (
@@ -206,7 +370,22 @@ class ActivityStore:
             async with db.execute("SELECT name FROM sqlite_master WHERE type='table'") as cursor:
                 names = {row[0] for row in await cursor.fetchall()}
             result["backup_tables"] = sorted(name for name in names if name.endswith("_legacy_bak"))
-            result["new_tables"] = sorted(name for name in names if name in {"activity_daily", "activity_hourly", "legacy_daily_metrics", "schema_migrations"})
+            result["new_tables"] = sorted(
+                name
+                for name in names
+                if name
+                in {
+                    "activity_daily",
+                    "activity_hourly",
+                    "activity_messages",
+                    "legacy_daily_metrics",
+                    "schema_migrations",
+                }
+            )
+            active_legacy_tables = set(expected).intersection(names)
+            if result["backup_tables"] and not active_legacy_tables and "activity_daily" in names:
+                result["already_migrated"] = True
+                return result
             if result["backup_tables"]:
                 result["ok"] = False
                 result["reason"] = "legacy backup tables already exist"

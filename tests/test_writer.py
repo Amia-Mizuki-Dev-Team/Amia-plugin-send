@@ -1,6 +1,7 @@
 import unittest
 import asyncio
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from datetime import date, datetime
 
@@ -92,6 +93,42 @@ class TestSendWriter(unittest.TestCase):
             row_map = {r[0]: (r[1], r[2]) for r in rows}
             self.assertEqual(row_map["3333"], (1, 512))
             self.assertEqual(row_map["4444"], (1, 1024))
+
+        asyncio.run(run_test())
+
+    def test_message_dedupe_key_counts_same_event_once(self):
+        async def run_test():
+            await self.store.initialize()
+            record = ActivityRecord(
+                activity_date=date.today(),
+                activity_hour=12,
+                scope=ActivityScope(
+                    adapter_type="onebot.v11",
+                    adapter_instance_id="test-instance",
+                    bot_id="1111",
+                    bot_app_id="test-app",
+                    scope_verified=True,
+                ),
+                context_type="group",
+                context_id="2222",
+                gensokyo_user_id="3333",
+                canonical_user_id=None,
+                display_name="User3333",
+                message_bytes=512,
+                occurred_at=datetime.now(),
+                message_id="message-1",
+                dedupe_key="dedupe-1",
+            )
+            await self.store.upsert_batch([record, replace(record)])
+
+            daily = await self.store.fetch_one(
+                "SELECT message_count FROM activity_daily", ()
+            )
+            messages = await self.store.fetch_one(
+                "SELECT COUNT(*) FROM activity_messages", ()
+            )
+            self.assertEqual(daily, (1,))
+            self.assertEqual(messages, (1,))
 
         asyncio.run(run_test())
 

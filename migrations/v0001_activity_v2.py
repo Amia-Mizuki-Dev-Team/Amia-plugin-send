@@ -9,7 +9,7 @@ from typing import Any
 
 import aiosqlite
 
-from ..storage import ActivityStore
+from ..storage import ActivityStore, SCHEMA_VERSION, create_schema
 
 
 async def dry_run(db_path: str | Path) -> dict[str, Any]:
@@ -43,6 +43,8 @@ async def migrate(
     res = await store.legacy_dry_run()
     if not res.get("ok"):
         raise RuntimeError(f"Migration dry_run failed: {res}")
+    if res.get("already_migrated"):
+        return
 
     tables = res.get("tables", {})
     # If expected legacy tables do not exist, nothing to migrate
@@ -69,90 +71,9 @@ async def migrate(
         await db.execute("PRAGMA busy_timeout=10000")
         await db.execute("BEGIN IMMEDIATE")
         try:
-            # 1. Create the new schema tables
-            await db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS schema_migrations (
-                    version TEXT PRIMARY KEY,
-                    checksum TEXT NOT NULL,
-                    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    status TEXT NOT NULL,
-                    details_json TEXT NOT NULL DEFAULT '{}'
-                );
-                CREATE TABLE IF NOT EXISTS activity_daily (
-                    date TEXT NOT NULL,
-                    adapter_type TEXT NOT NULL,
-                    adapter_instance_id TEXT NOT NULL,
-                    bot_id TEXT NOT NULL,
-                    bot_app_id TEXT NOT NULL,
-                    context_type TEXT NOT NULL CHECK(context_type IN ('group', 'private')),
-                    context_id TEXT NOT NULL,
-                    gensokyo_user_id TEXT NOT NULL,
-                    canonical_user_id TEXT,
-                    display_name TEXT,
-                    message_count INTEGER NOT NULL DEFAULT 0 CHECK(message_count >= 0),
-                    total_bytes INTEGER NOT NULL DEFAULT 0 CHECK(total_bytes >= 0),
-                    first_seen_at TEXT NOT NULL,
-                    last_seen_at TEXT NOT NULL,
-                    legacy_source TEXT,
-                    PRIMARY KEY (
-                        date, adapter_type, adapter_instance_id, bot_id, bot_app_id,
-                        context_type, context_id, gensokyo_user_id
-                    )
-                );
-                CREATE TABLE IF NOT EXISTS activity_hourly (
-                    date TEXT NOT NULL,
-                    hour INTEGER NOT NULL CHECK(hour BETWEEN 0 AND 23),
-                    adapter_type TEXT NOT NULL,
-                    adapter_instance_id TEXT NOT NULL,
-                    bot_id TEXT NOT NULL,
-                    bot_app_id TEXT NOT NULL,
-                    context_type TEXT NOT NULL CHECK(context_type IN ('group', 'private')),
-                    context_id TEXT NOT NULL,
-                    message_count INTEGER NOT NULL DEFAULT 0,
-                    total_bytes INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (
-                        date, hour, adapter_type, adapter_instance_id, bot_id,
-                        bot_app_id, context_type, context_id
-                    )
-                );
-                CREATE TABLE IF NOT EXISTS legacy_daily_metrics (
-                    date TEXT NOT NULL,
-                    adapter_type TEXT NOT NULL,
-                    adapter_instance_id TEXT NOT NULL,
-                    bot_id TEXT NOT NULL,
-                    bot_app_id TEXT NOT NULL,
-                    total_bytes INTEGER NOT NULL DEFAULT 0,
-                    source_table TEXT NOT NULL,
-                    PRIMARY KEY (
-                        date, adapter_type, adapter_instance_id, bot_id,
-                        bot_app_id, source_table
-                    )
-                );
-                CREATE TABLE IF NOT EXISTS legacy_hourly_metrics (
-                    date TEXT NOT NULL,
-                    hour INTEGER NOT NULL CHECK(hour BETWEEN 0 AND 23),
-                    message_count INTEGER NOT NULL,
-                    source_table TEXT NOT NULL,
-                    PRIMARY KEY (date, hour, source_table)
-                );
-                CREATE INDEX IF NOT EXISTS idx_activity_group_range ON activity_daily (
-                    adapter_instance_id, bot_app_id, bot_id, context_type, context_id, date
-                );
-                CREATE INDEX IF NOT EXISTS idx_activity_instance_dau ON activity_daily (
-                    adapter_instance_id, bot_app_id, date, gensokyo_user_id
-                );
-                CREATE INDEX IF NOT EXISTS idx_activity_canonical_dau ON activity_daily (
-                    adapter_instance_id, bot_app_id, date, canonical_user_id
-                ) WHERE canonical_user_id IS NOT NULL;
-                CREATE INDEX IF NOT EXISTS idx_activity_user_range ON activity_daily (
-                    adapter_instance_id, bot_app_id, gensokyo_user_id, date
-                );
-                CREATE INDEX IF NOT EXISTS idx_activity_hour_range ON activity_hourly (
-                    adapter_instance_id, bot_app_id, context_type, context_id, date, hour
-                );
-                """
-            )
+            # 1. Create the new schema tables without executescript so a
+            # failure in the later copy/validation steps can roll back DDL.
+            await create_schema(db)
 
             # 2. Rename old tables to backup tables
             if tables.get("msg_stats", {}).get("exists"):
@@ -258,7 +179,7 @@ async def migrate(
                 VALUES (?, ?, 'applied', ?)
                 """,
                 (
-                    "send-activity-v2-0001",
+                    SCHEMA_VERSION,
                     "migrated-from-legacy",
                     json.dumps({
                         "mode": "migrated",

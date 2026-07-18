@@ -2,4 +2,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.db
+*.db-wal
+*.db-shm
+*.dead-letter.jsonl
+*.pre-v2.*.bak
 .pytest_cache/
