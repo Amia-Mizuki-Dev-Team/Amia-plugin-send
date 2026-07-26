@@ -1,0 +1,18 @@
+gensokyo:
+  last_verified_release: "009"
+  verified_at: "2026-07-25T14:29:00Z"
+  baseline_commit: "cb1f22818d4a4f9e736ecdd8aec651261b53fd6f"
+  verification:
+    status: partial
+    evidence: ["tests/test_identity.py", "tests/test_stats.py", "tests/test_writer.py", "tests/test_migration_0001.py", "tests/test_regressions.py"]
+  modes:
+    string_message: false
+    array_message: false
+    use_uin_true: false
+    use_uin_false: false
+    markdown: false
+    keyboard: false
+  automated_tested: false
+  live_tested: false
+  known_issues:
+    - "Release009 shared fixtures pass; repository-specific integration is pending."
