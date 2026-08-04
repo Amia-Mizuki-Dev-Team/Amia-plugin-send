@@ -404,3 +404,7 @@ python benchmarks/benchmark_send.py
 - 不把未验证实例 DAU描述成准确值；
 - 不提交数据库、WAL、SHM、备份和 dead-letter；
 - 当前仓库尚未确定公开许可证。
+
+## Release010 发布说明
+
+Release010 只更新消息身份/夹具兼容状态和测试证据，不改变现有统计数据库语义。字符串与数组消息段的自动化通过不代表 `use_uin=true/false` 已实机验证；数据库迁移、真实吞吐和生产重启仍需部署环境验证。
