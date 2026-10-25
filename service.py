@@ -1,3 +1,13 @@
+"""Scoped activity service for Send.
+
+Identity quality counters are in-memory only: they reset on every restart and
+the database stores no quality column, so ``activity_daily.canonical_user_id IS
+NULL`` is the only persisted raw/merged distinction.  Resolution is discovered
+per event and history is never recomputed; the ``COALESCE`` forward-fill on an
+existing date/scope row is the only write that can touch an older row, and it
+only carries the *new* event's canonical id.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -8,7 +18,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from nonebot.adapters.onebot.v11 import MessageEvent
 from .config import SendConfig, load_send_config
 from .core_contract import get_core
-from .identity import build_activity_record
+from .identity import (
+    IDENTITY_PROBLEM_STATUSES,
+    IDENTITY_STATUS_DISCOVERY_ERROR,
+    ResolutionOutcome,
+    build_activity_record,
+)
 from .models import ActivityScope
 from .storage import ActivityStore, LegacyDatabaseDetected
 from .writer import ActivityWriter
@@ -22,7 +37,11 @@ class ActivityService:
         self.config = config or load_send_config()
         self.store = ActivityStore(self.config.db_path)
         self.writer = ActivityWriter(self.store, self.config)
-        self.resolver: Any | None = None
+        # The identity resolver is discovered per event (see
+        # _discover_resolver); no resolver is captured here or at startup, so a
+        # late or replaced resolver takes effect on the next event.
+        self.resolver_status_counts: dict[str, int] = {}
+        self._last_resolver_status: str | None = None
         self.ready = False
 
     def _today(self) -> date:
@@ -47,13 +66,6 @@ class ActivityService:
             return
 
         core = get_core()
-        if self.resolver is None:
-            self.resolver = core.UnresolvedIdentityResolver()
-
-        resolver = core.registry.get_identity_resolver()
-        if resolver:
-            self.resolver = resolver
-
         core.registry.register_stats_provider("send", self, replace=True)
         await self.writer.start()
         self.ready = True
@@ -66,13 +78,72 @@ class ActivityService:
     async def record_event(self, event: MessageEvent) -> None:
         if not self.ready:
             return
+        resolver, discovery_status = self._discover_resolver()
+        outcome = ResolutionOutcome()
         record = await build_activity_record(
             event,
             self.config,
-            self.resolver,
+            resolver,
+            outcome=outcome,
         )
-        if record is not None:
-            self.writer.enqueue(record)
+        if record is None:
+            return
+        # One snapshot per event: nothing about this event is mixed with a
+        # later resolver swap, and the next event discovers again.
+        self._observe_resolver_status(discovery_status or outcome.status)
+        self.writer.enqueue(record)
+
+    def _discover_resolver(self) -> tuple[Any | None, str | None]:
+        """Discover the identity resolver that is current for one event.
+
+        Deliberately uncached: a resolver registered after Send started, or one
+        that replaced another, must be used by the next event without a bot or
+        plugin restart.  ``None`` is never remembered either, so a missing
+        service cannot pin later events to the raw fallback forever.
+        """
+
+        try:
+            return get_core().registry.get_identity_resolver(), None
+        except Exception as exc:  # noqa: BLE001 - discovery must not break collection
+            logger.warning(
+                "send identity resolver discovery failed (%s); recording the "
+                "event without a canonical identity",
+                type(exc).__name__,
+            )
+            return None, IDENTITY_STATUS_DISCOVERY_ERROR
+
+    def _observe_resolver_status(self, status: str) -> None:
+        """Count identity quality and log state transitions only.
+
+        Counters keep exact per-status totals; logging fires only when the
+        conversion path degrades or recovers, so an absent resolver cannot
+        flood the log.  Neither the counters nor the log lines carry chat
+        bodies, user ids, mappings or raw exception text.
+        """
+
+        self.resolver_status_counts[status] = (
+            self.resolver_status_counts.get(status, 0) + 1
+        )
+        previous = self._last_resolver_status
+        self._last_resolver_status = status
+        if status in IDENTITY_PROBLEM_STATUSES:
+            if previous not in IDENTITY_PROBLEM_STATUSES:
+                logger.warning(
+                    "send identity resolution degraded (%s); affected events "
+                    "are recorded without a canonical identity",
+                    status,
+                )
+        elif previous in IDENTITY_PROBLEM_STATUSES:
+            logger.info("send identity resolution restored (%s)", status)
+
+    def resolver_diagnostics(self) -> dict[str, Any]:
+        """Return per-event resolver counters without identities or bodies."""
+
+        return {
+            "mode": "per_event",
+            "last_status": self._last_resolver_status,
+            "counts": dict(self.resolver_status_counts),
+        }
 
     def _scope(self, bot_id: str | None = None) -> ActivityScope:
         return ActivityScope(
@@ -495,11 +566,13 @@ class ActivityService:
                 "ok": False,
                 "status": "database_error",
                 "error_type": type(exc).__name__,
+                "identity": self.resolver_diagnostics(),
             }
         return {
             "ok": row == (1,),
             "status": "ready" if row == (1,) else "database_error",
             "scope_verified": bool(self.config.bot_app_id),
+            "identity": self.resolver_diagnostics(),
         }
 
 
